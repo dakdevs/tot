@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # Builds a universal (arm64 + x86_64) Release Tot.app stamped with a date-based version, signs it,
 # and zips it for Sparkle: build/release/Tot.app and build/release/Tot.zip.
 #

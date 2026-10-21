@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # Regenerates docs/images/overlay-*.png from mock data (docs/demo/demo-seed.sql) over a neutral backdrop.
 set -euo pipefail
 cd "$(dirname "$0")/.."

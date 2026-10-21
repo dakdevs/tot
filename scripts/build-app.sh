@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # Generates the Xcode project from project.yml and builds Tot.app into build/.
 set -euo pipefail
 cd "$(dirname "$0")/.."

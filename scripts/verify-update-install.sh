@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # End-to-end install check on a maintainer Mac: builds release apps 20000101.1 (installed) and
 # 20000101.2 (update), signs the update with Tot's EdDSA key from the login Keychain, serves the feed
 # locally, lets UpdateInstallUITests click Install and Relaunch, then checks the bundle was replaced
