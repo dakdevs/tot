@@ -1,0 +1,190 @@
+# Checks every pull request and push to main. Each push to main that changes more than docs, and each
+# manual run on main, then publishes a release named YYYYMMDD.N (UTC date, Nth release that day) with
+# Tot.zip and the Sparkle appcast.xml that installed copies poll for updates. See docs/releasing.md.
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: brew install xcodegen
+      - run: xcodebuild -version
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run prettier
+      - run: bun test
+      - run: scripts/build-app.sh
+
+  release:
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: macos-26
+    permissions:
+      contents: write
+    # One release at a time, so two runs can't claim the same version. A newer pending run replaces an
+    # older pending one; its release includes the skipped commits.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    # Secrets and the token are scoped to the steps that use them.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: brew install xcodegen
+
+      - name: Choose version
+        id: version
+        run: |
+          set -euo pipefail
+          output=$(bun scripts/release-version.ts)
+          echo "$output"
+          grep -Eq '^version=[0-9]{8}\.[1-9][0-9]*$' <<<"$output"
+          echo "$output" >>"$GITHUB_OUTPUT"
+
+      - name: Skip if already released or superseded
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          EXISTING: ${{ steps.version.outputs.existing }}
+          # Optional. Without a Developer ID certificate the app is ad-hoc signed and not notarized.
+          HAS_DEVELOPER_ID: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' }}
+        run: |
+          set -euo pipefail
+          echo "developer_id=$HAS_DEVELOPER_ID" >>"$GITHUB_OUTPUT"
+          releases=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$VERSION\")" |
+            jq -s .)
+          if jq -e 'any(.[]; (.draft | not) and ([.assets[].name] | index("Tot.zip") and index("appcast.xml")))' \
+            <<<"$releases" >/dev/null; then
+            echo "Release $VERSION is already published for this commit."
+            echo "done=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Re-running an older commit must not publish it as the newest release.
+          if [[ "$EXISTING" != true && "$(git ls-remote origin refs/heads/main | cut -f1)" != "$GITHUB_SHA" ]]; then
+            echo "$GITHUB_SHA is no longer the tip of main; the newer commit's run releases it."
+            echo "done=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Drafts or incomplete releases left by a failed run; rebuild from scratch.
+          jq -r '.[].id' <<<"$releases" | while read -r id; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done
+          echo "done=false" >>"$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificate
+        if: steps.published.outputs.done == 'false' && steps.published.outputs.developer_id == 'true'
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          base64 --decode <<<"$DEVELOPER_ID_P12_BASE64" >"$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+          [[ -n "$identity" ]] || { echo "No valid Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "DEVELOPER_ID_IDENTITY=$identity" >>"$GITHUB_ENV"
+          if [[ -n "$NOTARY_KEY_P8_BASE64" ]]; then
+            base64 --decode <<<"$NOTARY_KEY_P8_BASE64" >"$RUNNER_TEMP/notary.p8"
+            echo "NOTARY_KEY_PATH=$RUNNER_TEMP/notary.p8" >>"$GITHUB_ENV"
+          fi
+
+      - name: Build, sign, and verify
+        if: steps.published.outputs.done == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SPARKLE_ED_PRIVATE_KEY" ]] || { echo "SPARKLE_ED_PRIVATE_KEY secret is not set" >&2; exit 1; }
+          scripts/build-release.sh "$VERSION"
+          signature=$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" |
+            build/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update --ed-key-file - -p build/release/Tot.zip)
+
+          previous=$(git tag --list | grep -E '^[0-9]{8}\.[1-9][0-9]*$' | grep -vx "$VERSION" |
+            sort -t. -k1,1n -k2,2n | tail -1 || true)
+          git log --format=%s --no-merges -n 30 ${previous:+"$previous..HEAD"} >build/release/notes.txt
+          bun scripts/appcast.ts render "$VERSION" "$signature" build/release/Tot.zip build/release/notes.txt \
+            >build/release/appcast.xml
+          bun scripts/appcast.ts verify build/release/Tot.app build/release/Tot.zip build/release/appcast.xml
+
+          # Describe what the built app actually carries, not which secrets were present.
+          signature_info=$(codesign -dvv build/release/Tot.app 2>&1)
+          if ! grep -q '^Authority=Developer ID Application' <<<"$signature_info"; then
+            signing="Ad-hoc signed; not notarized. Updates are verified with Tot's EdDSA key."
+          elif xcrun stapler validate build/release/Tot.app >/dev/null 2>&1; then
+            signing="Developer ID signed and notarized."
+          else
+            signing="Developer ID signed; not notarized."
+          fi
+          {
+            echo "Universal (Apple silicon and Intel), macOS 26 or later. $signing"
+            echo
+            echo "## Changes"
+            sed 's/^/- /' build/release/notes.txt
+          } >build/release/release-notes.md
+
+      - name: Publish release
+        if: steps.published.outputs.done == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Drafts get assets first, so the public latest/download/appcast.xml never points at a missing zip.
+          gh release create "$VERSION" build/release/Tot.zip build/release/appcast.xml --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Tot $VERSION" --notes-file build/release/release-notes.md --draft
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      - name: Verify the published feed
+        if: steps.published.outputs.done == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          check="$RUNNER_TEMP/published"
+          mkdir -p "$check"
+          expected="https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/Tot.zip"
+          # The latest/download alias can briefly serve the previous release's feed.
+          for attempt in {1..20}; do
+            curl -fsSL --retry 5 --retry-all-errors \
+              "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" -o "$check/appcast.xml"
+            url=$(sed -n 's/.*<enclosure url="\([^"]*\)".*/\1/p' "$check/appcast.xml")
+            [[ "$url" == "$expected" ]] && break
+            echo "Attempt $attempt: feed still points at $url"
+            sleep 15
+          done
+          [[ "$url" == "$expected" ]]
+          curl -fsSL --retry 5 --retry-all-errors "$url" -o "$check/Tot.zip"
+          ditto -x -k "$check/Tot.zip" "$check"
+          bun scripts/appcast.ts verify "$check/Tot.app" "$check/Tot.zip" "$check/appcast.xml"

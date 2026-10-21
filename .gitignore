@@ -1,0 +1,6 @@
+.build/
+build/
+Tot.xcodeproj/
+node_modules/
+*.xcresult
+.DS_Store

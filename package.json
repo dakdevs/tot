@@ -1,0 +1,18 @@
+{
+  "name": "tot",
+  "private": true,
+  "scripts": {
+    "build": "scripts/build-app.sh",
+    "app": "open \"$(scripts/build-app.sh | tail -1)\"",
+    "test:e2e": "bun test ./e2e/overlay.e2e.ts",
+    "lint": "xcrun swift-format lint --strict --recursive --parallel Package.swift sources app tests ui-tests docs/demo",
+    "format": "xcrun swift-format format --in-place --recursive --parallel Package.swift sources app tests ui-tests docs/demo && prettier --write .",
+    "prettier": "prettier --check .",
+    "test:update-install": "scripts/verify-update-install.sh",
+    "release:build": "scripts/build-release.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "prettier": "^3.9.10"
+  }
+}

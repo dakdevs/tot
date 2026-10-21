@@ -1,0 +1,74 @@
+name: Tot
+options:
+  bundleIdPrefix: dev.dak
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+packages:
+  TotCore:
+    path: .
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    CODE_SIGN_IDENTITY: "-"
+    # Release builds override both with the date-based release version (scripts/build-release.sh).
+    MARKETING_VERSION: "0.0.0"
+    CURRENT_PROJECT_VERSION: "0"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+targets:
+  Tot:
+    type: application
+    platform: macOS
+    sources: [app/tot]
+    dependencies:
+      - package: TotCore
+      - package: Sparkle
+    info:
+      path: app/tot/info.plist
+      properties:
+        CFBundleDisplayName: Tot
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        SUFeedURL: https://github.com/dakdevs/tot/releases/latest/download/appcast.xml
+        SUPublicEDKey: axQrJF+DJSHeSNwS9TSy/FiuS53/Qqb7L+B1dnpZiLk=
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 3600
+        SUAllowsAutomaticUpdates: false
+        SUAutomaticallyUpdate: false
+        SUVerifyUpdateBeforeExtraction: true
+        LSUIElement: true
+        LSMinimumSystemVersion: "26.0"
+        NSHumanReadableCopyright: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dak.tot
+        ENABLE_HARDENED_RUNTIME: NO
+  TotUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [ui-tests]
+    dependencies:
+      - target: Tot
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dak.tot.ui-tests
+        TEST_TARGET_NAME: Tot
+        GENERATE_INFOPLIST_FILE: YES
+        # XCTestCase overrides are nonisolated; XCUI automation runs on the main thread anyway.
+        SWIFT_VERSION: "5.0"
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+schemes:
+  Tot:
+    build:
+      targets:
+        Tot: all
+        TotUITests: [test]
+    test:
+      targets: [TotUITests]
